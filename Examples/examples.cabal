@@ -1,0 +1,17 @@
+Name: dropbox-sdk-examples
+Version: 0.1
+Description: Examples that uses the dropbox-sdk package.
+License: MIT
+Author: Kannan Goundan
+Maintainer: kannan@dropbox.com
+Build-Type: Simple
+Cabal-Version: >= 1.10
+
+Executable simple
+    Build-Depends:
+        haskell2010  == 1.*,
+        bytestring   == 0.9.*,
+        dropbox-sdk
+    Main-Is: Simple.hs
+    Default-Language: Haskell2010
+    Default-Extensions: ScopedTypeVariables, OverloadedStrings

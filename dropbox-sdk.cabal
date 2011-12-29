@@ -1,0 +1,40 @@
+Name: dropbox-sdk
+Version: 0.1.0
+Synopsis: A (very preliminary) library to access the Dropbox HTTP API.
+Description:
+    The Dropbox HTTP API provides ways for applications to access
+    users' Dropbox accounts programmatically.
+License: MIT
+License-File: License.txt
+Author: Kannan Goundan <kannan@dropbox.com>
+Maintainer: Kannan Goundan <kannan@dropbox.com>
+Homepage: http://github.com/cakoose/dropbox-sdk
+Category: Network APIs
+Build-Type: Simple
+Cabal-Version: >= 1.10
+Data-Files: trusted-certs.crt
+
+Library
+    Build-Depends:
+        base         == 4.*,
+        bytestring   == 0.9.*,
+        HTTP         == 4000.*,
+        utf8-string  == 0.3.*,
+        urlencoded   == 0.3.*,
+        json         == 0.4.*,
+        time         == 1.4.*,
+        old-locale   == 1.0.*,
+        network      == 2.3.*,
+        enumerator   >= 0.4.16 && < 0.5,
+        http-types   >= 0.6.5 && < 0.7,
+        http-enumerator  >= 0.7.2.1 && < 0.8,
+        blaze-builder    == 0.3.*,
+        tls          == 0.8.*,
+        tls-extra    == 0.4.*,
+        certificate  == 1.*
+    HS-Source-Dirs: Source
+    Exposed-Modules: Dropbox
+    Other-Modules: Paths_dropbox_sdk
+    GHC-Options: -Wall -fno-warn-missing-signatures -fno-warn-name-shadowing
+    Default-Language: Haskell2010
+    Default-Extensions: OverloadedStrings, ScopedTypeVariables, Rank2Types
