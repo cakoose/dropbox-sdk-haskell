@@ -1,0 +1,7 @@
+0.1.1
+
+- Allow JSON 0.5.x (in addition to 0.4.x)
+
+0.1.0
+
+- Initial release.
