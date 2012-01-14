@@ -59,6 +59,11 @@ addFile mgr session = do
     DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
         `dieOnFailure` "Couldn't add Facts.txt"
 
+getFileContents mgr session = do
+    contents <- DB.getFileContents mgr session "/Facts.txt" Nothing
+        `dieOnFailure` "Couldn't read Facts.txt"
+    C8.putStrLn contents
+
 main_ :: DB.Hosts -> String -> String -> IO ()
 main_ hosts appKey appSecret = do
     config <- mkConfig hosts appKey appSecret
@@ -68,6 +73,7 @@ main_ hosts appKey appSecret = do
         accountInfo mgr session
         rootMetadata mgr session
         addFile mgr session
+        getFileContents mgr session
         return ()
 
 dieOnFailure :: IO (Either String v) -> String -> IO v
