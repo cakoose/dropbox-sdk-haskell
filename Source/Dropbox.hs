@@ -28,6 +28,8 @@ module Dropbox (
     getMetadata, getMetadataWithChildren, getMetadataWithChildrenIfChanged,
     Meta(..), MetaBase(..), MetaExtra(..), FolderContents(..), FileExtra(..),
     FolderHash(..), FileRevision(..),
+    -- ** Read files
+    getFileContents,
     -- ** Uploading files
     addFile, forceFile, updateFile,
     -- * Common data types
@@ -56,7 +58,6 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Word (Word64)
 import Data.Int (Int64)
-import Data.List (isPrefixOf)
 import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
@@ -597,18 +598,19 @@ instance JSON MetaWithChildren where
 ----------------------------------------------------------------------
 -- GetMetadata
 
+checkPath :: Path -> IO (Either ErrorMessage a) -> IO (Either ErrorMessage a)
+checkPath ('/':_) action = action
+checkPath _ _            = return $ Left $ "path must start with \"/\""
+
 -- |Get the metadata for the file or folder at the given path.
 getMetadata ::
     Manager    -- ^The HTTP connection manager to use.
     -> Session
     -> Path      -- ^The full path (relative to your 'DbAccessType' root)
     -> IO (Either ErrorMessage Meta)
-getMetadata mgr session path = do
-    if "/" `isPrefixOf` path
-        then do
-            result <- doGet mgr session hostsApi url params (mkHandler handler)
-            return $ mergeLefts result
-        else return $ Left $ "path must start with \"/\""
+getMetadata mgr session path = checkPath path $ do
+    result <- doGet mgr session hostsApi url params (mkHandler handler)
+    return $ mergeLefts result
     where
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "metadata/" ++ at ++ path
@@ -628,12 +630,9 @@ getMetadataWithChildren ::
         -- 'getMetadataWithChildren' call will fail with an HTTP 406 error code.  If unspecified, or
         -- if set to zero, the server will set this to 10,000.
     -> IO (Either ErrorMessage (Meta, Maybe FolderContents))
-getMetadataWithChildren mgr session path childLimit = do
-    if "/" `isPrefixOf` path
-        then do
-            result <- doGet mgr session hostsApi url params (mkHandler handler)
-            return $ mergeLefts result
-        else return $ Left $ "'path' must start with \"/\""
+getMetadataWithChildren mgr session path childLimit = checkPath path $ do
+    result <- doGet mgr session hostsApi url params (mkHandler handler)
+    return $ mergeLefts result
     where
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "metadata/" ++ at ++ path
@@ -656,12 +655,9 @@ getMetadataWithChildrenIfChanged ::
         -- for the specified path hasn't change, this call will return @Nothing@, which
         -- indicates that the previously-retrieved metadata is still the latest.
     -> IO (Either ErrorMessage (Maybe (Meta, Maybe FolderContents)))
-getMetadataWithChildrenIfChanged mgr session path childLimit (FolderHash hash) = do
-    if "/" `isPrefixOf` path
-        then do
-            result <- doGet mgr session hostsApi url params (mkHandler handler)
-            return $ mergeLefts result
-        else return $ Left $ "'path' must start with \"/\""
+getMetadataWithChildrenIfChanged mgr session path childLimit (FolderHash hash) = checkPath path $ do
+    result <- doGet mgr session hostsApi url params (mkHandler handler)
+    return $ mergeLefts result
     where
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "metadata/" ++ at ++ path
@@ -670,6 +666,25 @@ getMetadataWithChildrenIfChanged mgr session path childLimit (FolderHash hash) =
             Nothing -> []
         handler 200 _ body = handleJsonBodyT (\(MetaWithChildren v) -> Just v) body
         handler 304 _ _ = Right Nothing
+        handler code reason body = Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ reason ++ ": " ++ (show body) ++ ")"
+
+----------------------------------------------------------------------
+-- GetFileContents
+
+getFileContents ::
+    Manager               -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path               -- ^The full path (relative to your 'DbAccessType' root)
+    -> Maybe FileRevision -- ^The revision of the file to retrieve.
+    -> IO (Either ErrorMessage ByteString)
+getFileContents mgr session path mrev = checkPath path $ do
+    result <- doGet mgr session hostsApiContent url params (mkHandler handler)
+    return $ mergeLefts result
+    where
+        at = accessTypePath $ configAccessType (sessionConfig session)
+        url = "files/" ++ at ++ path
+        params = maybe [] (\(FileRevision rev) -> [("rev", rev)]) mrev
+        handler 200 _ body = Right body
         handler code reason body = Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ reason ++ ": " ++ (show body) ++ ")"
 
 ----------------------------------------------------------------------
@@ -723,12 +738,9 @@ putFile ::
     -> RequestBody
     -> [(String,String)]
     -> IO (Either ErrorMessage Meta)
-putFile mgr session path contents params =
-    if "/" `isPrefixOf` path
-        then do
-            result <- doPut mgr session hostsApiContent url params contents (mkHandler handler)
-            return $ mergeLefts result
-        else return $ Left $ "path must start with \"/\""
+putFile mgr session path contents params = checkPath path $ do
+    result <- doPut mgr session hostsApiContent url params contents (mkHandler handler)
+    return $ mergeLefts result
     where
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "files_put/" ++ at ++ path
