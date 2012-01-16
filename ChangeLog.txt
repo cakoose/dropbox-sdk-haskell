@@ -1,3 +1,6 @@
+- Switch from Data.Enumerator to Data.Conduit.
+- Add API call: GET /files (download file from Dropbox) [Tim Baumann]
+
 0.1.1
 
 - Allow JSON 0.5.x (in addition to 0.4.x)

@@ -38,28 +38,31 @@ auth mgr config = do
     return accessToken
 
 accountInfo mgr session = do
+    hPutStrLn stdout $ "---- Account Info ----"
     accountInfo <- DB.getAccountInfo mgr session
         `dieOnFailure` "Couldn't get account info"
-    hPutStrLn stdout $ "---- Account Info ----"
     hPutStrLn stdout $ show accountInfo
 
 rootMetadata mgr session = do
+    hPutStrLn stdout $ "---- Root Folder ----"
     (DB.Meta meta extra, mContents) <- DB.getMetadataWithChildren mgr session "/" Nothing
         `dieOnFailure` "Couldn't get root folder listing"
     (hash, children) <- case mContents of
         Just (DB.FolderContents hash children) -> return (hash, children)
         _ -> die "Root is not a folder?  What the poop?"
-    hPutStrLn stdout $ "---- Files ----"
     mapM_ ((hPutStrLn stdout).show) children
+    hPutStrLn stdout $ "---- Root Folder (Again) ----"
     secondTime <- DB.getMetadataWithChildrenIfChanged mgr session "/" Nothing hash
         `dieOnFailure` "Couldn't get root folder listing again"
     hPutStrLn stdout (show secondTime) -- Will almost always print "Nothing" (i.e. "nothing has changed")
 
 addFile mgr session = do
+    hPutStrLn stdout $ "---- Add File ----"
     DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
         `dieOnFailure` "Couldn't add Facts.txt"
 
 getFileContents mgr session = do
+    hPutStrLn stdout $ "---- Get File ----"
     contents <- DB.getFileContents mgr session "/Facts.txt" Nothing
         `dieOnFailure` "Couldn't read Facts.txt"
     C8.putStrLn contents

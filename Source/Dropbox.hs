@@ -62,16 +62,17 @@ import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
 import Control.Monad (liftM)
-import qualified Data.Enumerator as E
-import qualified Data.Enumerator.List as EL
-import qualified Network.HTTP.Enumerator as HE
+import qualified Control.Monad.Trans.Class as MT
+import qualified Data.Conduit as C
+import qualified Data.Conduit.List as CL
+import qualified Network.HTTP.Conduit as HC
 import qualified Network.HTTP.Types as HT
 import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra as TLSExtra
 import Data.Certificate.X509 (X509)
 import qualified Data.Certificate.X509 as X509
 import Data.Certificate.PEM as PEM
-import Data.Enumerator (Iteratee, Enumerator)
+import Data.Conduit (Sink, Source, Resource)
 import qualified Blaze.ByteString.Builder.ByteString as BlazeBS
 import System.IO as IO
 import qualified Paths_dropbox_sdk as Paths
@@ -721,7 +722,7 @@ updateFile mgr session path contents (FileRevision rev) =
 -- be overwritten.  If successful, you'll get back the metadata for your
 -- newly-uploaded file.
 forceFile ::
-    HE.Manager     -- ^The 'Network.HTTP.Enumerator.Manager' to use.
+    Manager    -- ^The HTTP connection manager to use.
     -> Session
     -> Path        -- ^The full path (relative to your 'DbAccessType' root)
     -> RequestBody -- ^The file contents.
@@ -732,7 +733,7 @@ forceFile mgr session path contents = putFile mgr session path contents [("overw
 -- The underlying "put_file" call.
 
 putFile ::
-    HE.Manager
+    HC.Manager
     -> Session
     -> Path
     -> RequestBody
@@ -792,31 +793,32 @@ doGet mgr session hostSelector path params handler = do
 
 ----------------------------------------------------------------------
 
-type Manager = HE.Manager
+type Manager = HC.Manager
 
 withManager :: (Manager -> IO r) -> IO r
-withManager = HE.withManager
+withManager inner = HC.withManager $ \manager ->
+    MT.lift $ inner manager
 
 ----------------------------------------------------------------------
 
 type SimpleHandler r = Int -> String -> ByteString -> r
 
 -- |HTTP response-handling function.
-type Handler r = HT.Status -> HT.ResponseHeaders -> (Iteratee ByteString IO r)
+type Handler r = HT.Status -> HT.ResponseHeaders -> (Sink ByteString IO r)
 
--- |An HTTP request body: an 'Int64' for the length and an 'Enumerator'
+-- |An HTTP request body: an 'Int64' for the length and a 'Source'
 -- that yields the actual data.
-data RequestBody = RequestBody Int64 (forall r. Enumerator ByteString IO r)
+data RequestBody = RequestBody Int64 (Source IO ByteString)
 
 -- |Create a 'RequestBody' from a single 'ByteString'
 bsRequestBody :: ByteString -> RequestBody
-bsRequestBody bs = RequestBody length (E.enumLists [[bs]])
+bsRequestBody bs = RequestBody length (CL.sourceList [bs])
     where
         length = fromInteger $ toInteger $ BS.length bs
 
 mkHandler :: SimpleHandler r -> Handler r
 mkHandler sh (HT.Status code reason) _headers = do
-    bs <- bsIteratee
+    bs <- bsSink
     return $ sh code (BS8.unpack reason) bs
 
 mergeLefts :: Either a (Either a b) -> Either a b
@@ -824,10 +826,10 @@ mergeLefts v = case v of
     Left a -> Left a
     Right r -> r
 
--- |An 'Iteratee' that reads in 'ByteString' chunks and constructs one concatenated 'ByteString'
-bsIteratee :: Monad m => Iteratee ByteString m ByteString
-bsIteratee = do
-    chunks <- EL.consume
+-- |A 'Sink' that reads in 'ByteString' chunks and constructs one concatenated 'ByteString'
+bsSink :: Resource m => Sink ByteString m ByteString
+bsSink = do
+    chunks <- CL.consume
     return $ BS.concat chunks
 
 httpClientDo ::
@@ -839,22 +841,24 @@ httpClientDo ::
     -> String
     -> Handler r
     -> IO (Either String r)
-httpClientDo mgr method (RequestBody len bsEnum) vf url oauthHeader handler =
-    case HE.parseUrl url of
+httpClientDo mgr method (RequestBody len bsSource) vf url oauthHeader handler =
+    case HC.parseUrl url of
         Just baseReq -> do
             let req = baseReq {
-                HE.secure = True,
-                HE.method = method,
-                HE.requestHeaders = headers,
-                HE.requestBody = HE.RequestBodyEnum len builderEnum,
-                HE.checkCerts = vf }
-            resp <- E.run_ $ HE.http req handler mgr
-            return $ Right resp
+                HC.secure = True,
+                HC.method = method,
+                HC.requestHeaders = headers,
+                HC.requestBody = HC.RequestBodySource len builderSource,
+                HC.checkCerts = vf,
+                HC.checkStatus = \_ _ -> Nothing }
+            HC.Response code headers body <- C.runResourceT $ HC.http req mgr
+            result <- C.runResourceT (body C.$$ handler code headers)
+            return $ Right result
         Nothing -> do
             return $ Left $ "bad URL: " ++ show url
     where
         headers = [("Authorization", UTF8.fromString oauthHeader)]
-        builderEnum = E.joinE bsEnum (EL.map BlazeBS.fromByteString)
+        builderSource = bsSource C.$= (CL.map BlazeBS.fromByteString)
 
 httpClientGet :: Manager -> CertVerifierFunc -> URL -> String -> Handler r -> IO (Either String r)
 httpClientGet mgr vf url oauthHeader handler = httpClientDo mgr "GET" (bsRequestBody BS.empty) vf url oauthHeader handler
