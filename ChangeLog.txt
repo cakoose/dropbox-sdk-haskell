@@ -1,5 +1,5 @@
+- New API call 'getFile' to download file from Dropbox [Tim Baumann].
 - Switch from Data.Enumerator to Data.Conduit.
-- Add API call: GET /files (download file from Dropbox) [Tim Baumann]
 
 0.1.1
 

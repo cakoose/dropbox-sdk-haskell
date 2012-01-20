@@ -24,24 +24,22 @@ module Dropbox (
     -- * Get user account info
     getAccountInfo, AccountInfo(..),
     -- * Basic file access API
-    -- ** Get metadata
+    -- ** Get file/folder metadata
     getMetadata, getMetadataWithChildren, getMetadataWithChildrenIfChanged,
     Meta(..), MetaBase(..), MetaExtra(..), FolderContents(..), FileExtra(..),
     FolderHash(..), FileRevision(..),
-    -- ** Read files
-    getFileContents,
-    -- ** Uploading files
+    -- ** Get files
+    getFile, getFileBs,
+    -- ** Upload files
     addFile, forceFile, updateFile,
     -- * Common data types
     fileRevisionToString, folderHashToString,
     ErrorMessage, URL, Path,
-    RequestBody, bsRequestBody
+    RequestBody, bsRequestBody, bsSink,
 ) where
 
 {-
 TODO:
-- The JSON we get from the server sometimes has numbers encoded as strings
-  Make sure we handle that case.
 - Proper return values for 404, 406, oauth unlinked, etc.
 -}
 
@@ -56,6 +54,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as BS8
+import Data.CaseInsensitive (CI)
 import Data.Word (Word64)
 import Data.Int (Int64)
 import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
@@ -670,23 +669,46 @@ getMetadataWithChildrenIfChanged mgr session path childLimit (FolderHash hash) =
         handler code reason body = Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ reason ++ ": " ++ (show body) ++ ")"
 
 ----------------------------------------------------------------------
--- GetFileContents
+-- GetFile
 
-getFileContents ::
+-- |Gets a file's contents and metadata.  If you just want the entire contents of
+-- a file as a single 'ByteString', use 'getFileBs'.
+getFile ::
     Manager               -- ^The HTTP connection manager to use.
     -> Session
     -> Path               -- ^The full path (relative to your 'DbAccessType' root)
     -> Maybe FileRevision -- ^The revision of the file to retrieve.
-    -> IO (Either ErrorMessage ByteString)
-getFileContents mgr session path mrev = checkPath path $ do
-    result <- doGet mgr session hostsApiContent url params (mkHandler handler)
+    -> (Meta -> Sink ByteString IO r)
+                          -- ^Given the file metadata, yield a 'Sink' to process the response body
+    -> IO (Either ErrorMessage (Meta, r))
+                          -- ^This function returns whatever your 'Sink' returns, paired up with the file metadata.
+getFile mgr session path mrev sink = checkPath path $ do
+    result <- doGet mgr session hostsApiContent url params handler
     return $ mergeLefts result
     where
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "files/" ++ at ++ path
         params = maybe [] (\(FileRevision rev) -> [("rev", rev)]) mrev
-        handler 200 _ body = Right body
-        handler code reason body = Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ reason ++ ": " ++ (show body) ++ ")"
+        handler (HT.Status 200 _) headers = case getHeaders "X-Dropbox-Metadata" headers of
+            [metaJson] -> case handleJsonBody metaJson of
+                Left err -> C.Sink $ return $ C.SinkNoData (Left err)
+                Right meta -> do
+                    r <- sink meta
+                    return $ Right (meta, r)
+            l -> return $ Left $ "expecting response to have exactly one \"X-Dropbox-Metadata\" header, found " ++ show (length l)
+        handler (HT.Status code reason) _ = do
+            body <- bsSink
+            return $ Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ (BS8.unpack reason) ++ ": " ++ (show body) ++ ")"
+
+-- |A variant of 'getFile' that just returns a strict 'ByteString' (instead of having
+-- you pass in a 'Sink' to process the body.
+getFileBs ::
+    Manager               -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path               -- ^The full path (relative to your 'DbAccessType' root)
+    -> Maybe FileRevision -- ^The revision of the file to retrieve.
+    -> IO (Either ErrorMessage (Meta, ByteString))
+getFileBs mgr session path mrev = getFile mgr session path mrev (\_ -> bsSink)
 
 ----------------------------------------------------------------------
 -- AddFile/ForceFile/UpdateFile
@@ -815,6 +837,9 @@ bsRequestBody :: ByteString -> RequestBody
 bsRequestBody bs = RequestBody length (CL.sourceList [bs])
     where
         length = fromInteger $ toInteger $ BS.length bs
+
+getHeaders :: CI HT.Ascii -> [HT.Header] -> [HT.Ascii]
+getHeaders name headers = [ val | (key, val) <- headers, key == name ]
 
 mkHandler :: SimpleHandler r -> Handler r
 mkHandler sh (HT.Status code reason) _headers = do

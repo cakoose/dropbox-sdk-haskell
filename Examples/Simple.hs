@@ -14,7 +14,7 @@ main = do
     case args of
         [appKey, appSecret] -> mainProd appKey appSecret
         _ -> do
-            putStrLn "Usage: COMMAND app-key app-secret"
+            hPutStrLn stderr "Usage: COMMAND app-key app-secret"
             exitFailure
 
 mainProd = main_ DB.hostsDefault
@@ -58,14 +58,16 @@ rootMetadata mgr session = do
 
 addFile mgr session = do
     hPutStrLn stdout $ "---- Add File ----"
-    DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
+    meta <- DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
         `dieOnFailure` "Couldn't add Facts.txt"
+    hPutStrLn stdout $ show meta
 
 getFileContents mgr session = do
     hPutStrLn stdout $ "---- Get File ----"
-    contents <- DB.getFileContents mgr session "/Facts.txt" Nothing
+    (meta, contents) <- DB.getFileBs mgr session "/Facts.txt" Nothing
         `dieOnFailure` "Couldn't read Facts.txt"
-    C8.putStrLn contents
+    hPutStrLn stdout $ show meta
+    C8.hPutStrLn stdout contents
 
 main_ :: DB.Hosts -> String -> String -> IO ()
 main_ hosts appKey appSecret = do
