@@ -12,7 +12,7 @@ module Dropbox (
     Locale,
     localeEn, localeEs, localeFr, localeDe, localeJp,
     AccessType(..),
-    -- * Manager
+    -- * HTTP connection manager
     Manager,
     withManager,
     -- * OAuth
@@ -23,19 +23,18 @@ module Dropbox (
     Session(..),
     -- * Get user account info
     getAccountInfo, AccountInfo(..),
-    -- * Basic file access API
-    -- ** Get file/folder metadata
+    -- * Get file/folder metadata
     getMetadata, getMetadataWithChildren, getMetadataWithChildrenIfChanged,
     Meta(..), MetaBase(..), MetaExtra(..), FolderContents(..), FileExtra(..),
     FolderHash(..), FileRevision(..),
-    -- ** Get files
+    -- * Get files
     getFile, getFileBs,
-    -- ** Upload files
+    -- * Upload files
     addFile, forceFile, updateFile,
     -- * Common data types
     fileRevisionToString, folderHashToString,
     ErrorMessage, URL, Path,
-    RequestBody, bsRequestBody, bsSink,
+    RequestBody(..), bsRequestBody, bsSink,
 ) where
 
 {-
@@ -87,10 +86,10 @@ apiVersion = "1"
 -- |The type of folder access your Dropbox application uses (<https://www.dropbox.com/developers/start/core>).
 data AccessType
     = AccessTypeDropbox   -- ^Full access to the user's entire Dropbox
-    | AccessTypeAppFolder -- ^Access to an application-specific "app folder" within the user's Dropbox
+    | AccessTypeAppFolder -- ^Access to an application-specific \"app folder\" within the user's Dropbox
     deriving (Show, Eq)
 
--- |Your application's Dropbox "app key" and "app secret".
+-- |Your application's Dropbox \"app key\" and \"app secret\".
 data AppId = AppId String String deriving (Show, Eq)
 
 -- |An OAuth request token (returned by 'authStart')
@@ -125,27 +124,27 @@ hostsDefault = Hosts
 -- |Specifies a locale (the string is a two-letter locale code)
 newtype Locale = Locale String deriving (Show, Eq)
 
--- |The English (American) locale ("en").
+-- |English (American) (\"en\").
 localeEn :: Locale
 localeEn = Locale "en"
 
--- |The Spanish locale (@'Locale' "es"@).
+-- |Spanish (\"es\").
 localeEs :: Locale
 localeEs = Locale "es"
 
--- |The French locale (Locale "fr").
+-- |French (\"fr\").
 localeFr :: Locale
 localeFr = Locale "fr"
 
--- |The German locale (Locale "de").
+-- |German (\"de\").
 localeDe :: Locale
 localeDe = Locale "de"
 
--- |The Japanese locale (Locale "jp").
+-- |Japanese (\"jp\").
 localeJp :: Locale
 localeJp = Locale "jp"
 
--- |The configuration used to make authentication calls and API calls.  You typically create
+-- |The configuration used to make API calls.  You typically create
 -- one of these via the 'config' helper function.
 data Config = Config
     { configHosts :: Hosts           -- ^The hosts to connect to (just use 'hostsDefault').
@@ -169,7 +168,8 @@ data CertVerifier = CertVerifier
 instance Show CertVerifier where
     show (CertVerifier name _) = "CertVerifier " ++ show name
 
--- |A convenience function that constructs a 'Config'
+-- |A convenience function that constructs a 'Config'.  It's in the 'IO' monad because we read from
+-- a file to get the list of trusted SSL certificates, which is used to verify the server over SSL.
 mkConfig ::
     Locale
     -> String      -- ^Your Dropbox app key
@@ -232,10 +232,11 @@ certAll (head:rest) = do
         TLS.CertificateUsageAccept -> certAll rest
         reject -> return $ reject
 
--- |Given a set of root certificates, yields a certificate validation function.
+-- |A certificate validation routine.  It's in 'IO' to match what 'HTTP.Enumerator'
+-- expects, but we don't actually do any I/O.
 certVerifierFromRootCerts ::
     [X509]            -- ^The set of trusted root certificates.
-    -> HT.Ascii       -- ^The remove server's domain name.
+    -> HT.Ascii       -- ^The remote server's domain name.
     -> [X509]         -- ^The certificate chain provided by the remote server.
     -> IO TLS.TLSCertificateUsage
 -- TODO: Rewrite this crappy code.  SSL cert checking needs to be more correct than this.
@@ -480,16 +481,16 @@ data Meta = Meta MetaBase MetaExtra
 -- |Metadata common to both files and folders.
 data MetaBase = MetaBase
     { metaRoot :: AccessType  -- ^Matches the 'AccessType' of the app that retrieved the metadata.
-    , metaPath :: String      -- ^The full path (starting with a "/") of the file or folder, relative to 'metaRoot'
+    , metaPath :: String      -- ^The full path (starting with a \"/\") of the file or folder, relative to 'metaRoot'
     , metaIsDeleted :: Bool   -- ^Whether this metadata entry refers to a file that had been deleted when the entry was retrieved.
     , metaThumbnail :: Bool   -- ^Will be @True@ if this file might have a thumbnail, and @False@ if it definitely doesn't.
     , metaIcon :: String      -- ^The name of the icon used to illustrate this file type in Dropbox's icon library (<https://www.dropbox.com/static/images/dropbox-api-icons.zip>).
     } deriving (Eq, Show)
 
--- |Metadata that's specific to either files or folders.
+-- |Extra metadata (in addition to the stuff that's common to files and folders).
 data MetaExtra
     = File FileExtra    -- ^Files have additional metadata
-    | Folder            -- ^Folders do not
+    | Folder            -- ^Folders do not have any additional metadata
     deriving (Eq, Show)
 
 -- |Represents a file's revision ('fileRevision').
@@ -504,15 +505,15 @@ data FileExtra = FileExtra
     , fileModified :: UTCTime      -- ^When this file was added or last updated
     } deriving (Eq, Show)
 
--- |Represents an identifier for a folder's metadata and contents.  Can be used with
--- 'getMetadataWithChildrenIfChanged' to avoid downloading a folder's metadata and contents
+-- |Represents an identifier for a folder's metadata and children's metadata.  Can be used with
+-- 'getMetadataWithChildrenIfChanged' to avoid downloading a folder's metadata and children's metadata
 -- if it hasn't changed.
 newtype FolderHash = FolderHash String deriving (Eq, Show)
 folderHashToString (FolderHash s) = s
 
--- |The single-level contents of a folder.
+-- |The metadata for the immediate children of a folder.
 data FolderContents = FolderContents
-    { folderHash :: FolderHash  -- ^An identifier for the folder's metadata and contents.
+    { folderHash :: FolderHash  -- ^An identifier for the folder's metadata and children's metadata.
     , folderChildren :: [Meta]  -- ^The metadata for the immediate children of a folder.
     } deriving (Eq, Show)
 
@@ -619,7 +620,7 @@ getMetadata mgr session path = checkPath path $ do
         handler code reason body = Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ reason ++ ": " ++ (show body) ++ ")"
 
 -- |Get the metadata for the file or folder at the given path.  If it's a folder,
--- return the first-level folder contents' metadata entries as well.
+-- return the metadata for the folder's immediate children as well.
 getMetadataWithChildren ::
     Manager    -- ^The HTTP connection manager to use.
     -> Session
@@ -724,12 +725,10 @@ addFile ::
     -> IO (Either ErrorMessage Meta)
 addFile mgr session path contents = putFile mgr session path contents [("overwrite", "false")]
 
--- |Overwrite a file, assuming it is the version you expect.  Specify the version
--- you expect with the 'FileRevision'.  If the file on Dropbox matches the given
--- revision, the file will be replaced with the contents you specify.  If the file
--- on Dropbox doesn't have the specified revision, it will be left alone and your
--- file will be automatically renamed.  If successful, you'll get back the metadata
--- for your newly-uploaded file.
+-- |Overwrite a file with new data if the version on Dropbox matches the version
+-- you specify.  If the version doesn't match, create a new file with a unique
+-- name.  Either way, you will be returned the metdata for whichever file was
+-- written.
 updateFile ::
     Manager    -- ^The HTTP connection manager to use.
     -> Session
@@ -815,8 +814,11 @@ doGet mgr session hostSelector path params handler = do
 
 ----------------------------------------------------------------------
 
+-- |The HTTP connection manager.  Using the same 'Manager' instance across
+-- multiple API calls 
 type Manager = HC.Manager
 
+-- |A bracket around an HTTP connection manager.
 withManager :: (Manager -> IO r) -> IO r
 withManager inner = HC.withManager $ \manager ->
     MT.lift $ inner manager
@@ -825,7 +827,7 @@ withManager inner = HC.withManager $ \manager ->
 
 type SimpleHandler r = Int -> String -> ByteString -> r
 
--- |HTTP response-handling function.
+-- HTTP response-handling function.
 type Handler r = HT.Status -> HT.ResponseHeaders -> (Sink ByteString IO r)
 
 -- |An HTTP request body: an 'Int64' for the length and a 'Source'

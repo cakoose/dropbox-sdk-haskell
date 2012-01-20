@@ -1,9 +1,9 @@
 Name: dropbox-sdk
-Version: 0.1.1
-Synopsis: A (very preliminary) library to access the Dropbox HTTP API.
+Version: 0.2.0
+Synopsis: A library to access the Dropbox HTTP API.
 Description:
-    The Dropbox HTTP API provides ways for applications to access
-    users' Dropbox accounts programmatically.
+    A (very preliminary) library to access the Dropbox HTTP API:
+    <https://www.dropbox.com/developers/reference/api>
 License: MIT
 License-File: License.txt
 Author: Kannan Goundan <kannan@dropbox.com>
