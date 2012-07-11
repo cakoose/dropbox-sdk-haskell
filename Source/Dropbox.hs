@@ -78,7 +78,6 @@ import Data.Conduit (Sink, Source)
 import qualified Blaze.ByteString.Builder.ByteString as BlazeBS
 import System.IO as IO
 
--- TODO How this is generated?
 import qualified Paths_dropbox_sdk as Paths
 
 type ErrorMessage = String
