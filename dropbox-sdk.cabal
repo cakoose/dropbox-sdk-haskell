@@ -31,7 +31,7 @@ Library
         case-insensitive >= 0.2 && < 0.5,
         http-types   >= 0.6.5 && < 0.7,
         http-conduit == 1.5.*,
-        --monad-control == 0.3.1.*,
+        monad-control == 0.3.1.*,
         blaze-builder == 0.3.*,
         tls          == 0.9.*,
         tls-extra    == 0.4.*,
