@@ -896,8 +896,9 @@ httpClientDo mgr method (RequestBody len bsSource) url oauthHeader handler =
                 HC.requestHeaders = headers,
                 HC.requestBody = HC.RequestBodySource len builderSource,
                 HC.checkStatus = \_ _ -> Nothing }
-            HC.Response code _ headers body <- runResourceT $ HC.http req mgr
-            result <- runResourceT (body $$+- handler code headers)
+            result <- runResourceT $ do
+                HC.Response code _ headers body <- HC.http req mgr
+                body $$+- handler code headers
             return $ Right result
         Nothing -> do
             return $ Left $ "bad URL: " ++ show url
