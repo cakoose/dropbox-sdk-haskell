@@ -1,3 +1,6 @@
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleContexts #-}
+
 module Dropbox (
     -- * Configuration
     mkConfig,
@@ -60,8 +63,9 @@ import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
 import Control.Monad (liftM)
-import qualified Control.Monad.Trans.Class as MT
-import qualified Data.Conduit as C
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Trans.Resource (ResourceT, MonadResource(..), runResourceT, allocate)
+import Data.Conduit (($=), ($$+-))
 import qualified Data.Conduit.List as CL
 import qualified Network.HTTP.Conduit as HC
 import qualified Network.HTTP.Types as HT
@@ -69,10 +73,12 @@ import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra as TLSExtra
 import Data.Certificate.X509 (X509)
 import qualified Data.Certificate.X509 as X509
-import Data.Certificate.PEM as PEM
-import Data.Conduit (Sink, Source, Resource)
+import Data.PEM as PEM
+import Data.Conduit (Sink, Source)
 import qualified Blaze.ByteString.Builder.ByteString as BlazeBS
 import System.IO as IO
+
+-- TODO How this is generated?
 import qualified Paths_dropbox_sdk as Paths
 
 type ErrorMessage = String
@@ -151,22 +157,7 @@ data Config = Config
     , configUserLocale :: Locale     -- ^The locale that the Dropbox service should use when returning user-visible strings.
     , configAppId :: AppId           -- ^Your app's key/secret
     , configAccessType :: AccessType -- ^The type of folder access your Dropbox application uses.
-    , configCertVerifier :: CertVerifier -- ^The server certificate validation routine.
     } deriving (Show)
-
-type CertVerifierFunc =
-    HT.Ascii                       -- ^The server's host name.
-    -> [X509]                      -- ^The server's certificate chain.
-    -> IO TLS.TLSCertificateUsage  -- ^Whether the certificate chain is valid or not.
-
--- |How the server's SSL certificate will be verified.
-data CertVerifier = CertVerifier
-    { certVerifierName :: String -- ^The human-friendly name of the policy (only for debug prints)
-    , certVerifierFunc :: CertVerifierFunc -- ^The function that implements certificate validation.
-    }
-
-instance Show CertVerifier where
-    show (CertVerifier name _) = "CertVerifier " ++ show name
 
 -- |A convenience function that constructs a 'Config'.  It's in the 'IO' monad because we read from
 -- a file to get the list of trusted SSL certificates, which is used to verify the server over SSL.
@@ -177,18 +168,11 @@ mkConfig ::
     -> AccessType  -- ^'configAccessType'
     -> IO Config
 mkConfig userLocale appKey appSecret accessType = do
-    caFile <- Paths.getDataFileName "trusted-certs.crt"
-    vf <- do
-        r <- certVerifierFromPemFile caFile
-        case r of
-            Right vf -> return $ vf
-            Left err -> fail $ "Unable to load root certificates from " ++ (show caFile) ++ ": " ++ err
     return $ Config
         { configHosts = hostsDefault
         , configUserLocale = userLocale
         , configAppId = AppId appKey appSecret
         , configAccessType = accessType
-        , configCertVerifier = vf
         }
 
 -- |Contains a 'Config' and an 'AccessToken'.  Every API call (after OAuth is complete)
@@ -218,11 +202,13 @@ rightsOrFirstLeft = foldr f (Right [])
 certVerifierFromPemFile :: FilePath -> IO (Either ErrorMessage CertVerifier)
 certVerifierFromPemFile filePath = do
     raw <- withFile filePath IO.ReadMode BS.hGetContents
-    let pems = PEM.parsePEMs raw
-    let es = [X509.decodeCertificate (LBS.fromChunks [stuff]) | (_, stuff) <- pems]
-    case rightsOrFirstLeft es of
+    case PEM.pemParseBS raw of
         Left err -> return $ Left err
-        Right x509s -> return $ Right $ CertVerifier ("PEM file: " ++ show filePath) (certVerifierFromRootCerts x509s)
+        Right pems -> do
+            let es = [X509.decodeCertificate (LBS.fromChunks [stuff]) | PEM _ _ stuff <- pems]
+            case rightsOrFirstLeft es of
+                Left err -> return $ Left err
+                Right x509s -> return $ Right $ CertVerifier ("PEM file: " ++ show filePath) (certVerifierFromRootCerts x509s)
 
 certAll :: [IO TLS.TLSCertificateUsage] -> IO TLS.TLSCertificateUsage
 certAll [] = return TLS.CertificateUsageAccept
@@ -303,7 +289,7 @@ authStart ::
     -> Maybe URL -- ^The callback URL (optional)
     -> IO (Either ErrorMessage (RequestToken, URL))
 authStart mgr config callback = do
-    result <- httpClientGet mgr vf uri oauthHeader (mkHandler handler)
+    result <- httpClientGet mgr uri oauthHeader (mkHandler handler)
     return $ mergeLefts result
     where
         Locale locale = configUserLocale config
@@ -312,7 +298,9 @@ authStart mgr config callback = do
         consumerPair = configAppId config
         uri = "https://" ++ host ++ ":443/" ++ apiVersion ++ "/oauth/request_token?locale=" ++ urlEncode locale
         oauthHeader = buildOAuthHeaderNoToken consumerPair
-        vf = certVerifierFunc $ configCertVerifier config
+
+        -- The handler is a callback that is executed on the response
+        -- In case the of OK:
         handler 200 _ body = do
             let sBody = UTF8.toString body  -- toString should return a Maybe, but it doesn't.  You too, Haskell?
             case parseTokenParts sBody of
@@ -320,10 +308,13 @@ authStart mgr config callback = do
                 Right requestToken@(RequestToken requestTokenKey _) -> do
                     let authorizeUrl = "https://" ++ webHost ++ "/"++apiVersion++"/oauth/authorize?locale=" ++ urlEncode locale ++ "&oauth_token=" ++ urlEncode requestTokenKey ++ callbackSuffix
                     Right (requestToken, authorizeUrl)
+        -- In case of an error:
         handler code reason body = Left $ "server returned " ++ show code ++ ": " ++ show reason ++ ": " ++ show body
+        
         callbackSuffix = case callback of
             Nothing -> ""
             Just callbackUrl -> "&oauth_callback=" ++ urlEncode callbackUrl
+        
         parseTokenParts :: String -> Either String RequestToken
         parseTokenParts s = do
             enc <- URLEncoded.importString s
@@ -341,7 +332,7 @@ authFinish ::
     -> IO (Either ErrorMessage (AccessToken, String))
         -- ^The 'AccessToken' used to make Dropbox API calls and the user's Dropbox user ID.
 authFinish mgr config (RequestToken rtKey rtSecret) = do
-    result <- httpClientGet mgr vf uri oauthHeader (mkHandler handler)
+    result <- httpClientGet mgr uri oauthHeader (mkHandler handler)
     return $ mergeLefts result
     where
         host = hostsApi (configHosts config)
@@ -349,7 +340,6 @@ authFinish mgr config (RequestToken rtKey rtSecret) = do
         consumerPair = configAppId config
         uri = "https://" ++ host ++ ":443/"++apiVersion++"/oauth/access_token?locale=" ++ urlEncode locale
         oauthHeader = buildOAuthHeader consumerPair (rtKey, rtSecret)
-        vf = certVerifierFunc $ configCertVerifier config
         handler 200 _ body = do
             let sBody = UTF8.toString body  -- toString should return a Maybe, but it doesn't.  You too, Haskell?
             case parseResponse sBody of
@@ -679,7 +669,7 @@ getFile ::
     -> Session
     -> Path               -- ^The full path (relative to your 'DbAccessType' root)
     -> Maybe FileRevision -- ^The revision of the file to retrieve.
-    -> (Meta -> Sink ByteString IO r)
+    -> (Meta -> Sink ByteString (ResourceT IO) r)
                           -- ^Given the file metadata, yield a 'Sink' to process the response body
     -> IO (Either ErrorMessage (Meta, r))
                           -- ^This function returns whatever your 'Sink' returns, paired up with the file metadata.
@@ -690,13 +680,15 @@ getFile mgr session path mrev sink = checkPath path $ do
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "files/" ++ at ++ path
         params = maybe [] (\(FileRevision rev) -> [("rev", rev)]) mrev
+
         handler (HT.Status 200 _) headers = case getHeaders "X-Dropbox-Metadata" headers of
             [metaJson] -> case handleJsonBody metaJson of
-                Left err -> C.Sink $ return $ C.SinkNoData (Left err)
+                Left err -> return (Left err)
                 Right meta -> do
                     r <- sink meta
                     return $ Right (meta, r)
             l -> return $ Left $ "expecting response to have exactly one \"X-Dropbox-Metadata\" header, found " ++ show (length l)
+        
         handler (HT.Status code reason) _ = do
             body <- bsSink
             return $ Left $ "non-200 response from Dropbox (" ++ (show code) ++ ":" ++ (BS8.unpack reason) ++ ": " ++ (show body) ++ ")"
@@ -796,8 +788,7 @@ doPut ::
     -> IO (Either ErrorMessage r)
 doPut mgr session hostSelector path params requestBody handler = do
     let (uri, oauthHeader) = prepRequest session hostSelector path params
-    let vf = certVerifierFunc $ configCertVerifier $ sessionConfig session
-    httpClientPut mgr vf uri oauthHeader handler requestBody
+    httpClientPut mgr uri oauthHeader handler requestBody
 
 doGet ::
     Manager
@@ -809,30 +800,56 @@ doGet ::
     -> IO (Either ErrorMessage r)
 doGet mgr session hostSelector path params handler = do
     let (uri, oauthHeader) = prepRequest session hostSelector path params
-    let vf = certVerifierFunc $ configCertVerifier $ sessionConfig session
-    httpClientGet mgr vf uri oauthHeader handler
+    httpClientGet mgr uri oauthHeader handler
 
 ----------------------------------------------------------------------
+
+type CertVerifierFunc =
+    ByteString                     -- ^The server's host name.
+    -> [X509]                      -- ^The server's certificate chain.
+    -> IO TLS.TLSCertificateUsage  -- ^Whether the certificate chain is valid or not.
+
+-- |How the server's SSL certificate will be verified.
+data CertVerifier = CertVerifier
+    { certVerifierName :: String -- ^The human-friendly name of the policy (only for debug prints)
+    , certVerifierFunc :: CertVerifierFunc -- ^The function that implements certificate validation.
+    }
+
+instance Show CertVerifier where
+    show (CertVerifier name _) = "CertVerifier " ++ show name
+
+-- |`ManagerSettings` that include the DropBox SSL certificates
+managerSettings :: (MonadIO m) => m HC.ManagerSettings
+managerSettings = do 
+    caFile <- liftIO $ Paths.getDataFileName "trusted-certs.crt"
+    vf <- do
+        r <- liftIO $ certVerifierFromPemFile caFile
+        case r of
+            Right vf -> return $ vf
+            Left err -> fail $ "Unable to load root certificates from " ++ (show caFile) ++ ": " ++ err
+    return $ HC.def { HC.managerCheckCerts = certVerifierFunc vf }
 
 -- |The HTTP connection manager.  Using the same 'Manager' instance across
 -- multiple API calls 
 type Manager = HC.Manager
 
 -- |A bracket around an HTTP connection manager.
-withManager :: (Manager -> IO r) -> IO r
-withManager inner = HC.withManager $ \manager ->
-    MT.lift $ inner manager
+
+withManager inner = runResourceT $ do
+    ms <- managerSettings
+    (_, manager) <- allocate (HC.newManager ms) HC.closeManager
+    inner manager
 
 ----------------------------------------------------------------------
 
 type SimpleHandler r = Int -> String -> ByteString -> r
 
 -- HTTP response-handling function.
-type Handler r = HT.Status -> HT.ResponseHeaders -> (Sink ByteString IO r)
+type Handler r = HT.Status -> HT.ResponseHeaders -> (Sink ByteString (ResourceT IO) r)
 
 -- |An HTTP request body: an 'Int64' for the length and a 'Source'
 -- that yields the actual data.
-data RequestBody = RequestBody Int64 (Source IO ByteString)
+data RequestBody = RequestBody Int64 (Source (ResourceT IO) ByteString)
 
 -- |Create a 'RequestBody' from a single 'ByteString'
 bsRequestBody :: ByteString -> RequestBody
@@ -854,21 +871,21 @@ mergeLefts v = case v of
     Right r -> r
 
 -- |A 'Sink' that reads in 'ByteString' chunks and constructs one concatenated 'ByteString'
-bsSink :: Resource m => Sink ByteString m ByteString
+bsSink :: (Monad m) => Sink ByteString m ByteString
 bsSink = do
     chunks <- CL.consume
     return $ BS.concat chunks
 
+-- | Runs an http request with a given oauth header
 httpClientDo ::
     Manager
-    -> HT.Ascii
+    -> HT.Method
     -> RequestBody
-    -> CertVerifierFunc
     -> URL
     -> String
     -> Handler r
     -> IO (Either String r)
-httpClientDo mgr method (RequestBody len bsSource) vf url oauthHeader handler =
+httpClientDo mgr method (RequestBody len bsSource) url oauthHeader handler =
     case HC.parseUrl url of
         Just baseReq -> do
             let req = baseReq {
@@ -876,19 +893,18 @@ httpClientDo mgr method (RequestBody len bsSource) vf url oauthHeader handler =
                 HC.method = method,
                 HC.requestHeaders = headers,
                 HC.requestBody = HC.RequestBodySource len builderSource,
-                HC.checkCerts = vf,
                 HC.checkStatus = \_ _ -> Nothing }
-            HC.Response code headers body <- C.runResourceT $ HC.http req mgr
-            result <- C.runResourceT (body C.$$ handler code headers)
+            HC.Response code _ headers body <- runResourceT $ HC.http req mgr
+            result <- runResourceT (body $$+- handler code headers)
             return $ Right result
         Nothing -> do
             return $ Left $ "bad URL: " ++ show url
     where
         headers = [("Authorization", UTF8.fromString oauthHeader)]
-        builderSource = bsSource C.$= (CL.map BlazeBS.fromByteString)
+        builderSource = bsSource $= (CL.map BlazeBS.fromByteString)
 
-httpClientGet :: Manager -> CertVerifierFunc -> URL -> String -> Handler r -> IO (Either String r)
-httpClientGet mgr vf url oauthHeader handler = httpClientDo mgr "GET" (bsRequestBody BS.empty) vf url oauthHeader handler
+httpClientGet :: Manager -> URL -> String -> Handler r -> IO (Either String r)
+httpClientGet mgr url oauthHeader handler = httpClientDo mgr HT.methodGet (bsRequestBody BS.empty) url oauthHeader handler
 
-httpClientPut :: Manager -> CertVerifierFunc -> URL -> String -> Handler r -> RequestBody -> IO (Either String r)
-httpClientPut mgr vf url oauthHeader handler requestBody = httpClientDo mgr "PUT" requestBody vf url oauthHeader handler
+httpClientPut :: Manager -> URL -> String -> Handler r -> RequestBody -> IO (Either String r)
+httpClientPut mgr url oauthHeader handler requestBody = httpClientDo mgr HT.methodPut requestBody url oauthHeader handler
