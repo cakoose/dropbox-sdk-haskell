@@ -6,6 +6,8 @@ import System.Environment (getArgs)
 import System.IO (hGetLine, hPutStrLn, stderr, stdout, stdin)
 import qualified Data.ByteString.Char8 as C8
 
+import Control.Monad.IO.Class (liftIO)
+
 hostsDev = DB.Hosts "meta.dbdev.corp.dropbox.com" "api.dbdev.corp.dropbox.com" "api-content.dbdev.corp.dropbox.com"
 
 main :: IO ()
@@ -25,7 +27,7 @@ mkConfig hosts appKey appSecret = do
     base <- DB.mkConfig DB.localeEn appKey appSecret DB.AccessTypeDropbox
     return $ base { DB.configHosts = hosts }
 
-auth mgr config = do
+auth mgr config = liftIO $ do
     -- OAuth
     (requestToken, authUrl) <- DB.authStart mgr config Nothing
         `dieOnFailure` "Couldn't get request token"
@@ -37,13 +39,13 @@ auth mgr config = do
     hPutStrLn stdout $ "Access Token: " ++ show accessToken
     return accessToken
 
-accountInfo mgr session = do
+accountInfo mgr session = liftIO $ do
     hPutStrLn stdout $ "---- Account Info ----"
     accountInfo <- DB.getAccountInfo mgr session
         `dieOnFailure` "Couldn't get account info"
     hPutStrLn stdout $ show accountInfo
 
-rootMetadata mgr session = do
+rootMetadata mgr session = liftIO $ do
     hPutStrLn stdout $ "---- Root Folder ----"
     (DB.Meta meta extra, mContents) <- DB.getMetadataWithChildren mgr session "/" Nothing
         `dieOnFailure` "Couldn't get root folder listing"
@@ -56,13 +58,13 @@ rootMetadata mgr session = do
         `dieOnFailure` "Couldn't get root folder listing again"
     hPutStrLn stdout (show secondTime) -- Will almost always print "Nothing" (i.e. "nothing has changed")
 
-addFile mgr session = do
+addFile mgr session = liftIO $ do
     hPutStrLn stdout $ "---- Add File ----"
     meta <- DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
         `dieOnFailure` "Couldn't add Facts.txt"
     hPutStrLn stdout $ show meta
 
-getFileContents mgr session = do
+getFileContents mgr session = liftIO $ do
     hPutStrLn stdout $ "---- Get File ----"
     (meta, contents) <- DB.getFileBs mgr session "/Facts.txt" Nothing
         `dieOnFailure` "Couldn't read Facts.txt"

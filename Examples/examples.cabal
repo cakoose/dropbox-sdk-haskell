@@ -11,6 +11,7 @@ Executable simple
     Build-Depends:
         haskell2010  == 1.*,
         bytestring   == 0.9.*,
+        transformers == 0.3.*,
         dropbox-sdk
     Main-Is: Simple.hs
     Default-Language: Haskell2010
