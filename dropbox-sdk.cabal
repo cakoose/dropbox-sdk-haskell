@@ -29,7 +29,7 @@ Library
         conduit      == 0.5.*,
         resourcet    == 0.3.3.*,
         case-insensitive >= 0.2 && < 0.5,
-        http-types   >= 0.6.5 && < 0.7,
+        http-types   == 0.7.*,
         http-conduit == 1.5.*,
         monad-control == 0.3.1.*,
         blaze-builder == 0.3.*,

@@ -56,7 +56,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as BS8
-import Data.CaseInsensitive (CI)
 import Data.Word (Word64)
 import Data.Int (Int64)
 import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
@@ -70,6 +69,7 @@ import Data.Conduit (($=), ($$+-))
 import qualified Data.Conduit.List as CL
 import qualified Network.HTTP.Conduit as HC
 import qualified Network.HTTP.Types as HT
+import qualified Network.HTTP.Types.Header as HT
 import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra as TLSExtra
 import Data.Certificate.X509 (X509)
@@ -222,7 +222,7 @@ certAll (head:rest) = do
 -- expects, but we don't actually do any I/O.
 certVerifierFromRootCerts ::
     [X509]            -- ^The set of trusted root certificates.
-    -> HT.Ascii       -- ^The remote server's domain name.
+    -> ByteString     -- ^The remote server's domain name.
     -> [X509]         -- ^The certificate chain provided by the remote server.
     -> IO TLS.TLSCertificateUsage
 -- TODO: Rewrite this crappy code.  SSL cert checking needs to be more correct than this.
@@ -858,7 +858,7 @@ bsRequestBody bs = RequestBody length (CL.sourceList [bs])
     where
         length = fromInteger $ toInteger $ BS.length bs
 
-getHeaders :: CI HT.Ascii -> [HT.Header] -> [HT.Ascii]
+getHeaders :: HT.HeaderName -> [HT.Header] -> [ByteString]
 getHeaders name headers = [ val | (key, val) <- headers, key == name ]
 
 mkHandler :: Monad m => SimpleHandler r 
