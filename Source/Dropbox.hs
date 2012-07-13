@@ -836,6 +836,8 @@ type Manager = HC.Manager
 
 -- |A bracket around an HTTP connection manager.
 
+withManager :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
+            => (HC.Manager -> ResourceT m a) -> m a
 withManager inner = runResourceT $ do
     ms <- managerSettings
     (_, manager) <- allocate (HC.newManager ms) HC.closeManager
