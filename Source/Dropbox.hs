@@ -1,4 +1,3 @@
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
 
 module Dropbox (
@@ -30,10 +29,9 @@ module Dropbox (
     getMetadata, getMetadataWithChildren, getMetadataWithChildrenIfChanged,
     Meta(..), MetaBase(..), MetaExtra(..), FolderContents(..), FileExtra(..),
     FolderHash(..), FileRevision(..),
-    -- * Get files
+    -- * Upload/download files
     getFile, getFileBs,
-    -- * Upload files
-    addFile, forceFile, updateFile,
+    putFile, WriteMode(..),
     -- * Common data types
     fileRevisionToString, folderHashToString,
     ErrorMessage, URL, Path,
@@ -60,16 +58,16 @@ import Data.Int (Int64)
 import Data.Time.Clock (UTCTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
+import System.IO as IO
 import Control.Monad (liftM)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Resource (ResourceT, MonadUnsafeIO, MonadThrow, MonadResource(..), runResourceT, allocate)
-import Data.Conduit (($=), ($$+-))
+import Data.Conduit (Sink, Source, ($=), ($$+-))
 import qualified Data.Conduit.List as CL
 import qualified Network.HTTP.Conduit as HC
 import qualified Network.HTTP.Types as HT
 import qualified Network.HTTP.Types.Header as HT
-import Data.Conduit (Sink, Source)
 import qualified Blaze.ByteString.Builder.ByteString as BlazeBS
 
 import Dropbox.Certificates
@@ -199,8 +197,8 @@ buildOAuthHeader (AppId consumerKey consumerSecret) (signingKey, signingSecret) 
 -- to next.  If you provide a callback URL (optional), then the authorization URL you
 -- send the user to will redirect to your callback URL after the user authorizes your
 -- application.
-authStart
-    :: Manager      -- ^The HTTP connection manager to use.
+authStart ::
+    Manager      -- ^The HTTP connection manager to use.
     -> Config
     -> Maybe URL -- ^The callback URL (optional)
     -> IO (Either ErrorMessage (RequestToken, URL))
@@ -241,8 +239,8 @@ authStart mgr config callback = do
 -- |OAuth step 3.  Once you've directed the user to the authorization URL from 'authStart'
 -- and the user has authorized your app, call this function to get a 'RequestToken', which
 -- is used to make Dropbox API calls.
-authFinish
-    :: Manager       -- ^The HTTP connection manager to use.
+authFinish ::
+    Manager          -- ^The HTTP connection manager to use.
     -> Config
     -> RequestToken  -- ^The 'RequestToken' obtained from 'authStart'
     -> IO (Either ErrorMessage (AccessToken, String))
@@ -510,11 +508,12 @@ checkPath ('/':_) action = action
 checkPath _ _            = return $ Left $ "path must start with \"/\""
 
 -- |Get the metadata for the file or folder at the given path.
-getMetadata :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-            => Manager    -- ^The HTTP connection manager to use.
-            -> Session
-            -> Path      -- ^The full path (relative to your 'DbAccessType' root)
-            -> m (Either ErrorMessage Meta)
+getMetadata ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager    -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path      -- ^The full path (relative to your 'DbAccessType' root)
+    -> m (Either ErrorMessage Meta)
 getMetadata mgr session path = checkPath path $ do
     result <- doGet mgr session hostsApi url params (mkHandler handler)
     return $ mergeLefts result
@@ -527,8 +526,8 @@ getMetadata mgr session path = checkPath path $ do
 
 -- |Get the metadata for the file or folder at the given path.  If it's a folder,
 -- return the metadata for the folder's immediate children as well.
-getMetadataWithChildren 
-    :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+getMetadataWithChildren ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
     => Manager    -- ^The HTTP connection manager to use.
     -> Session
     -> Path       -- ^The full path (relative to your 'DbAccessType' root)
@@ -552,8 +551,8 @@ getMetadataWithChildren mgr session path childLimit = checkPath path $ do
 
 -- |Same as 'getMetadataWithChildren' except it'll return @Nothing@ if the 'FolderHash'
 -- of the folder on Dropbox is the same as the 'FolderHash' passed in.
-getMetadataWithChildrenIfChanged 
-    :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+getMetadataWithChildrenIfChanged ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
     => Manager       -- ^The HTTP connection manager to use.
     -> Session
     -> Path
@@ -581,15 +580,16 @@ getMetadataWithChildrenIfChanged mgr session path childLimit (FolderHash hash) =
 
 -- |Gets a file's contents and metadata.  If you just want the entire contents of
 -- a file as a single 'ByteString', use 'getFileBs'.
-getFile :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
-        => Manager               -- ^The HTTP connection manager to use.
-        -> Session
-        -> Path               -- ^The full path (relative to your 'DbAccessType' root)
-        -> Maybe FileRevision -- ^The revision of the file to retrieve.
-        -> (Meta -> Sink ByteString (ResourceT m) r)
-                              -- ^Given the file metadata, yield a 'Sink' to process the response body
-        -> m (Either ErrorMessage (Meta, r))
-                              -- ^This function returns whatever your 'Sink' returns, paired up with the file metadata.
+getFile ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
+    => Manager               -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path               -- ^The full path (relative to your 'DbAccessType' root)
+    -> Maybe FileRevision -- ^The revision of the file to retrieve.
+    -> (Meta -> Sink ByteString (ResourceT m) r)
+                          -- ^Given the file metadata, yield a 'Sink' to process the response body
+    -> m (Either ErrorMessage (Meta, r))
+                          -- ^This function returns whatever your 'Sink' returns, paired up with the file metadata.
 getFile mgr session path mrev sink = checkPath path $ do
     result <- doGet mgr session hostsApiContent url params handler
     return $ mergeLefts result
@@ -612,67 +612,43 @@ getFile mgr session path mrev sink = checkPath path $ do
 
 -- |A variant of 'getFile' that just returns a strict 'ByteString' (instead of having
 -- you pass in a 'Sink' to process the body.
-getFileBs :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-          => Manager               -- ^The HTTP connection manager to use.
-          -> Session
-          -> Path                  -- ^The full path (relative to your 'DbAccessType' root)
-          -> Maybe FileRevision    -- ^The revision of the file to retrieve.
-          -> m (Either ErrorMessage (Meta, ByteString))
+getFileBs ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager               -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path                  -- ^The full path (relative to your 'DbAccessType' root)
+    -> Maybe FileRevision    -- ^The revision of the file to retrieve.
+    -> m (Either ErrorMessage (Meta, ByteString))
 getFileBs mgr session path mrev = getFile mgr session path mrev (\_ -> bsSink)
 
 ----------------------------------------------------------------------
--- AddFile/ForceFile/UpdateFile
+-- putFile
 
--- |Add a new file.  If a file or folder already exists at the given path, your
--- file will be automatically renamed.  If successful, you'll get back the metadata
--- for your newly-uploaded file.
-addFile :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-        => Manager       -- ^The HTTP connection manager to use.
-        -> Session
-        -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-        -> RequestBody m -- ^The file contents.
-        -> m (Either ErrorMessage Meta)
-addFile mgr session path contents = putFile mgr session path contents [("overwrite", "false")]
+data WriteMode
+    = WriteModeAdd
+        -- ^If there is already a file at the specified path, rename the new file.
+    | WriteModeUpdate FileRevision
+        -- ^Check that there is a file there with the given revision.  If so, overwrite
+        -- it.  If not, rename the new file.
+    | WriteModeForce
+        -- ^If there is already a file at the specified path, overwrite it.
 
--- |Overwrite a file with new data if the version on Dropbox matches the version
--- you specify.  If the version doesn't match, create a new file with a unique
--- name.  Either way, you will be returned the metdata for whichever file was
--- written.
-updateFile :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-           => Manager       -- ^The HTTP connection manager to use.
-           -> Session
-           -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-           -> RequestBody m -- ^The file contents.
-           -> FileRevision  -- ^The revision of the file you expect to be writing to.
-           -> m (Either ErrorMessage Meta)
-updateFile mgr session path contents (FileRevision rev) =
-    putFile mgr session path contents [("parent_rev", rev)]
-
--- |Add a file.  If a file already exists at the given path, that file will
--- be overwritten.  If successful, you'll get back the metadata for your
--- newly-uploaded file.
-forceFile :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-          => Manager       -- ^The HTTP connection manager to use.
-          -> Session
-          -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-          -> RequestBody m -- ^The file contents.
-          -> m (Either ErrorMessage Meta)
-forceFile mgr session path contents = putFile mgr session path contents [("overwrite", "true")]
-
-----------------------------------------------------------------------
--- The underlying "put_file" call.
-
-putFile :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-        => HC.Manager
-        -> Session
-        -> Path
-        -> RequestBody m
-        -> [(String,String)]
-        -> m (Either ErrorMessage Meta)
-putFile mgr session path contents params = checkPath path $ do
+putFile ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager       -- ^The HTTP connection manager to use.
+    -> Session
+    -> Path          -- ^The full path (relative to your 'DbAccessType' root)
+    -> WriteMode
+    -> RequestBody m -- ^The file contents.
+    -> m (Either ErrorMessage Meta)
+putFile mgr session path writeMode contents = checkPath path $ do
     result <- doPut mgr session hostsApiContent url params contents (mkHandler handler)
     return $ mergeLefts result
     where
+        params = case writeMode of
+            WriteModeAdd -> [("overwrite", "false")]
+            WriteModeUpdate (FileRevision rev) -> [("parent_rev", rev)]
+            WriteModeForce -> [("overwrite", "true")]
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "files_put/" ++ at ++ path
         handler 200 _ body = handleJsonBody body
@@ -694,27 +670,29 @@ prepRequest (Session config (AccessToken atKey atSecret)) hostSelector path para
         uri = generateDropboxURI' False "https:" host 443 ("/" ++ apiVersion ++ "/" ++ path) (("locale", locale) : params)
         oauthHeader = buildOAuthHeader consumerPair (atKey, atSecret)
 
-doPut :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-      => Manager
-      -> Session
-      -> (Hosts -> String)
-      -> String
-      -> [(String,String)]
-      -> RequestBody m
-      -> Handler r m
-      -> m (Either ErrorMessage r)
+doPut ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager
+    -> Session
+    -> (Hosts -> String)
+    -> String
+    -> [(String,String)]
+    -> RequestBody m
+    -> Handler r m
+    -> m (Either ErrorMessage r)
 doPut mgr session hostSelector path params requestBody handler = do
     let (uri, oauthHeader) = prepRequest session hostSelector path params
     httpClientPut mgr uri oauthHeader handler requestBody
 
-doGet :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-      => Manager
-      -> Session
-      -> (Hosts -> String)
-      -> String
-      -> [(String,String)]
-      -> Handler r m
-      -> m (Either ErrorMessage r)
+doGet ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager
+    -> Session
+    -> (Hosts -> String)
+    -> String
+    -> [(String,String)]
+    -> Handler r m
+    -> m (Either ErrorMessage r)
 doGet mgr session hostSelector path params handler = do
     let (uri, oauthHeader) = prepRequest session hostSelector path params
     httpClientGet mgr uri oauthHeader handler
@@ -732,8 +710,9 @@ type Manager = HC.Manager
 
 -- |A bracket around an HTTP connection manager.
 -- Uses default 'ManagerSettings' as computed by 'managerSettings'.
-withManager :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
-            => (HC.Manager -> ResourceT m a) -> m a
+withManager ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
+    => (HC.Manager -> ResourceT m a) -> m a
 withManager inner = runResourceT $ do
     ms <- managerSettings
     (_, manager) <- allocate (HC.newManager ms) HC.closeManager
@@ -759,8 +738,9 @@ bsRequestBody bs = RequestBody length (CL.sourceList [bs])
 getHeaders :: HT.HeaderName -> [HT.Header] -> [ByteString]
 getHeaders name headers = [ val | (key, val) <- headers, key == name ]
 
-mkHandler :: Monad m => SimpleHandler r 
-          -> Handler r m
+mkHandler ::
+    Monad m => SimpleHandler r 
+    -> Handler r m
 mkHandler sh (HT.Status code reason) _headers = do
     bs <- bsSink
     return $ sh code (BS8.unpack reason) bs
@@ -777,14 +757,15 @@ bsSink = do
     return $ BS.concat chunks
 
 -- | Runs an http request with a given oauth header
-httpClientDo :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-             => Manager
-             -> HT.Method
-             -> RequestBody m
-             -> URL
-             -> String
-             -> Handler r m
-             -> m (Either String r)
+httpClientDo ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager
+    -> HT.Method
+    -> RequestBody m
+    -> URL
+    -> String
+    -> Handler r m
+    -> m (Either String r)
 httpClientDo mgr method (RequestBody len bsSource) url oauthHeader handler =
     case HC.parseUrl url of
         Just baseReq -> do
@@ -804,19 +785,21 @@ httpClientDo mgr method (RequestBody len bsSource) url oauthHeader handler =
         headers = [("Authorization", UTF8.fromString oauthHeader)]
         builderSource = bsSource $= (CL.map BlazeBS.fromByteString)
 
-httpClientGet :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-              => Manager
-              -> URL
-              -> String
-              -> Handler r m
-              -> m (Either String r)
+httpClientGet ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager
+    -> URL
+    -> String
+    -> Handler r m
+    -> m (Either String r)
 httpClientGet mgr url oauthHeader handler = httpClientDo mgr HT.methodGet (bsRequestBody BS.empty) url oauthHeader handler
 
-httpClientPut :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-              => Manager
-              -> URL
-              -> String
-              -> Handler r m
-              -> RequestBody m
-              -> m (Either String r)
+httpClientPut ::
+    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
+    => Manager
+    -> URL
+    -> String
+    -> Handler r m
+    -> RequestBody m
+    -> m (Either String r)
 httpClientPut mgr url oauthHeader handler requestBody = httpClientDo mgr HT.methodPut requestBody url oauthHeader handler
