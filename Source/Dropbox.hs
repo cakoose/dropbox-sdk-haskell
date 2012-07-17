@@ -29,10 +29,9 @@ module Dropbox (
     getMetadata, getMetadataWithChildren, getMetadataWithChildrenIfChanged,
     Meta(..), MetaBase(..), MetaExtra(..), FolderContents(..), FileExtra(..),
     FolderHash(..), FileRevision(..),
-    -- * Get files
+    -- * Upload/download files
     getFile, getFileBs,
-    -- * Upload files
-    addFile, forceFile, updateFile,
+    putFile, WriteMode(..),
     -- * Common data types
     fileRevisionToString, folderHashToString,
     ErrorMessage, URL, Path,
@@ -706,62 +705,33 @@ getFileBs ::
 getFileBs mgr session path mrev = getFile mgr session path mrev (\_ -> bsSink)
 
 ----------------------------------------------------------------------
--- AddFile/ForceFile/UpdateFile
+-- putFile
 
--- |Add a new file.  If a file or folder already exists at the given path, your
--- file will be automatically renamed.  If successful, you'll get back the metadata
--- for your newly-uploaded file.
-addFile ::
-    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-    => Manager       -- ^The HTTP connection manager to use.
-    -> Session
-    -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-    -> RequestBody m -- ^The file contents.
-    -> m (Either ErrorMessage Meta)
-addFile mgr session path contents = putFile mgr session path contents [("overwrite", "false")]
-
--- |Overwrite a file with new data if the version on Dropbox matches the version
--- you specify.  If the version doesn't match, create a new file with a unique
--- name.  Either way, you will be returned the metdata for whichever file was
--- written.
-updateFile ::
-    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-    => Manager       -- ^The HTTP connection manager to use.
-    -> Session
-    -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-    -> RequestBody m -- ^The file contents.
-    -> FileRevision  -- ^The revision of the file you expect to be writing to.
-    -> m (Either ErrorMessage Meta)
-updateFile mgr session path contents (FileRevision rev) =
-    putFile mgr session path contents [("parent_rev", rev)]
-
--- |Add a file.  If a file already exists at the given path, that file will
--- be overwritten.  If successful, you'll get back the metadata for your
--- newly-uploaded file.
-forceFile ::
-    (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-    => Manager       -- ^The HTTP connection manager to use.
-    -> Session
-    -> Path          -- ^The full path (relative to your 'DbAccessType' root)
-    -> RequestBody m -- ^The file contents.
-    -> m (Either ErrorMessage Meta)
-forceFile mgr session path contents = putFile mgr session path contents [("overwrite", "true")]
-
-----------------------------------------------------------------------
--- The underlying "put_file" call.
+data WriteMode
+    = WriteModeAdd
+        -- ^If there is already a file at the specified path, rename the new file.
+    | WriteModeUpdate FileRevision
+        -- ^Check that there is a file there with the given revision.  If so, overwrite
+        -- it.  If not, rename the new file.
+    | WriteModeForce
+        -- ^If there is already a file at the specified path, overwrite it.
 
 putFile ::
     (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m) 
-    => HC.Manager
+    => Manager       -- ^The HTTP connection manager to use.
     -> Session
-    -> Path
-    -> RequestBody m
-    -> [(String,String)]
+    -> Path          -- ^The full path (relative to your 'DbAccessType' root)
+    -> WriteMode
+    -> RequestBody m -- ^The file contents.
     -> m (Either ErrorMessage Meta)
-putFile mgr session path contents params = checkPath path $ do
+putFile mgr session path writeMode contents = checkPath path $ do
     result <- doPut mgr session hostsApiContent url params contents (mkHandler handler)
     return $ mergeLefts result
     where
+        params = case writeMode of
+            WriteModeAdd -> [("overwrite", "false")]
+            WriteModeUpdate (FileRevision rev) -> [("parent_rev", rev)]
+            WriteModeForce -> [("overwrite", "true")]
         at = accessTypePath $ configAccessType (sessionConfig session)
         url = "files_put/" ++ at ++ path
         handler 200 _ body = handleJsonBody body

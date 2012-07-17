@@ -60,7 +60,7 @@ rootMetadata mgr session = liftIO $ do
 
 addFile mgr session = liftIO $ do
     hPutStrLn stdout $ "---- Add File ----"
-    meta <- DB.addFile mgr session "/Facts.txt" (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
+    meta <- DB.putFile mgr session "/Facts.txt" DB.WriteModeAdd (DB.bsRequestBody $ C8.pack "Rian hates types.\n")
         `dieOnFailure` "Couldn't add Facts.txt"
     hPutStrLn stdout $ show meta
 
