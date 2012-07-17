@@ -54,34 +54,28 @@ import qualified Text.JSON as JSON
 import Text.JSON (JSON, readJSON, showJSON)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Word (Word64)
 import Data.Int (Int64)
-import Data.Time.Clock (UTCTime(utctDay), getCurrentTime)
+import Data.Time.Clock (UTCTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
 import Control.Monad (liftM)
 import Control.Monad.IO.Class (MonadIO)
-import Control.Monad.Trans.Control (MonadBaseControl, liftBaseWith)
+import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Resource (ResourceT, MonadUnsafeIO, MonadThrow, MonadResource(..), runResourceT, allocate)
 import Data.Conduit (($=), ($$+-))
 import qualified Data.Conduit.List as CL
 import qualified Network.HTTP.Conduit as HC
 import qualified Network.HTTP.Types as HT
 import qualified Network.HTTP.Types.Header as HT
-import qualified Network.TLS as TLS
-import qualified Network.TLS.Extra as TLSExtra
-import Data.Certificate.X509 (X509)
-import qualified Data.Certificate.X509 as X509
-import Data.PEM as PEM
 import Data.Conduit (Sink, Source)
 import qualified Blaze.ByteString.Builder.ByteString as BlazeBS
-import System.IO as IO
 
-import qualified Paths_dropbox_sdk as Paths
+import Dropbox.Certificates
 
 type ErrorMessage = String
+
 type URL = String
 
 -- |Dropbox file and folder paths.  Should always start with "/".
@@ -181,84 +175,6 @@ data Session = Session
     { sessionConfig :: Config
     , sessionAccessToken :: AccessToken  -- ^The 'AccessToken' obtained from 'authFinish'
     }
-
-----------------------------------------------------------------------
--- SSL Certificate Validation
-
--- |A dummy implementation that doesn't perform any verification.
-certVerifierInsecure :: CertVerifier
-certVerifierInsecure = CertVerifier "insecure" (\_ _ -> return TLS.CertificateUsageAccept)
-
-rightsOrFirstLeft :: [Either a b] -> Either a [b]
-rightsOrFirstLeft = foldr f (Right [])
-    where
-        f (Left e) _ = Left e
-        f _ (Left e) = Left e
-        f (Right v) (Right vs) = Right (v:vs)
-
--- |Reads certificates in PEM format from the given file and uses those as the roots when
--- verifying certificates.  This function basically just loads the certificates and delegates
--- to 'certVerifierFromRootCerts' for the actual checking.
-certVerifierFromPemFile :: FilePath -> IO (Either ErrorMessage CertVerifier)
-certVerifierFromPemFile filePath = do
-    raw <- withFile filePath IO.ReadMode BS.hGetContents
-    case PEM.pemParseBS raw of
-        Left err -> return $ Left err
-        Right pems -> do
-            let es = [X509.decodeCertificate (LBS.fromChunks [stuff]) | PEM _ _ stuff <- pems]
-            case rightsOrFirstLeft es of
-                Left err -> return $ Left err
-                Right x509s -> return $ Right $ CertVerifier ("PEM file: " ++ show filePath) (certVerifierFromRootCerts x509s)
-
-certAll :: [IO TLS.TLSCertificateUsage] -> IO TLS.TLSCertificateUsage
-certAll [] = return TLS.CertificateUsageAccept
-certAll (head:rest) = do
-    r <- head
-    case r of
-        TLS.CertificateUsageAccept -> certAll rest
-        reject -> return $ reject
-
--- |A certificate validation routine.  It's in 'IO' to match what 'HTTP.Enumerator'
--- expects, but we don't actually do any I/O.
-certVerifierFromRootCerts ::
-    [X509]            -- ^The set of trusted root certificates.
-    -> ByteString     -- ^The remote server's domain name.
-    -> [X509]         -- ^The certificate chain provided by the remote server.
-    -> IO TLS.TLSCertificateUsage
--- TODO: Rewrite this crappy code.  SSL cert checking needs to be more correct than this.
-certVerifierFromRootCerts roots domain chain = do
-        utcTime <- getCurrentTime
-        let day = utctDay utcTime
-        certAll
-            [ return $ TLSExtra.certificateVerifyDomain (BS8.unpack domain) chain
-            , checkTrustChain day chain
-            ]
-    where
-        checkTrustChain _ [] = return $ TLS.CertificateUsageReject $ TLS.CertificateRejectOther "empty chain"
-        checkTrustChain day (head:rest) = do
-            if isUnexpired day head
-                then do
-                    issuerMatch <- mapM (head `isIssuedBy`) roots
-                    if any (== True) issuerMatch
-                        then return $ TLS.CertificateUsageAccept
-                        else case rest of
-                            [] -> return $ TLS.CertificateUsageReject TLS.CertificateRejectUnknownCA
-                            (next:_) -> do
-                                nextOk <- TLSExtra.certificateVerifyAgainst head next
-                                if nextOk
-                                    then checkTrustChain day rest
-                                    else return $ TLS.CertificateUsageReject $ TLS.CertificateRejectOther "break in verification chain"
-                else return $ TLS.CertificateUsageReject $ TLS.CertificateRejectExpired
-        isIssuedBy :: X509 -> X509 -> IO Bool
-        isIssuedBy c issuer =
-            if subjectDN issuer == issuerDN c
-                then TLSExtra.certificateVerifyAgainst c issuer
-                else return False
-        subjectDN c = X509.certSubjectDN $ X509.x509Cert c
-        issuerDN c = X509.certIssuerDN $ X509.x509Cert c
-        isUnexpired day cert =
-            let ((beforeDay, _, _), (afterDay, _, _)) = X509.certValidity (X509.x509Cert cert)
-            in beforeDay < day && day <= afterDay
 
 ----------------------------------------------------------------------
 -- Authentication/Authorization
@@ -805,37 +721,17 @@ doGet mgr session hostSelector path params handler = do
 
 ----------------------------------------------------------------------
 
-type CertVerifierFunc =
-    ByteString                     -- ^The server's host name.
-    -> [X509]                      -- ^The server's certificate chain.
-    -> IO TLS.TLSCertificateUsage  -- ^Whether the certificate chain is valid or not.
-
--- |How the server's SSL certificate will be verified.
-data CertVerifier = CertVerifier
-    { certVerifierName :: String -- ^The human-friendly name of the policy (only for debug prints)
-    , certVerifierFunc :: CertVerifierFunc -- ^The function that implements certificate validation.
-    }
-
-instance Show CertVerifier where
-    show (CertVerifier name _) = "CertVerifier " ++ show name
-
 -- |`ManagerSettings` that include the DropBox SSL certificates
 managerSettings :: (MonadBaseControl IO m) => m HC.ManagerSettings
 managerSettings = do 
-    caFile <- liftBaseWith $ const $ Paths.getDataFileName "trusted-certs.crt"
-    vf <- do
-        r <- liftBaseWith $ const $ certVerifierFromPemFile caFile
-        case r of
-            Right vf -> return $ vf
-            Left err -> fail $ "Unable to load root certificates from " ++ (show caFile) ++ ": " ++ err
-    return $ HC.def { HC.managerCheckCerts = certVerifierFunc vf }
+    return $ HC.def { HC.managerCheckCerts = certVerifierFunc certVerifierFromDbX509s }
 
 -- |The HTTP connection manager.  Using the same 'Manager' instance across
 -- multiple API calls 
 type Manager = HC.Manager
 
 -- |A bracket around an HTTP connection manager.
-
+-- Uses default 'ManagerSettings' as computed by 'managerSettings'.
 withManager :: (MonadBaseControl IO m, MonadThrow m, MonadUnsafeIO m, MonadIO m)
             => (HC.Manager -> ResourceT m a) -> m a
 withManager inner = runResourceT $ do

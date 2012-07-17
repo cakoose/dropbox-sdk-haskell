@@ -36,9 +36,10 @@ Library
         tls          == 0.9.*,
         tls-extra    == 0.4.*,
         certificate  == 1.*,
-        pem          == 0.1.*
+        pem          == 0.1.*,
+        template-haskell
     HS-Source-Dirs: Source
-    Exposed-Modules: Dropbox
+    Exposed-Modules: Dropbox, Dropbox.Certificates, Dropbox.Certificates.TH
     Other-Modules: Paths_dropbox_sdk
     GHC-Options: -Wall -fno-warn-missing-signatures -fno-warn-name-shadowing
     Default-Language: Haskell2010
