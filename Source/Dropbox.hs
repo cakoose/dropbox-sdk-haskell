@@ -58,7 +58,6 @@ import Data.Int (Int64)
 import Data.Time.Clock (UTCTime)
 import Data.Time.Format (parseTime, formatTime)
 import System.Locale (defaultTimeLocale)
-import System.IO as IO
 import Control.Monad (liftM)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Control (MonadBaseControl)
