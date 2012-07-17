@@ -1,3 +1,4 @@
 # "cabal build" output directories
+/cabal-dev
 /dist
 /Examples/dist
