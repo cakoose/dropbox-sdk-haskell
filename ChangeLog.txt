@@ -1,3 +1,8 @@
+- Update to lastest libs, notably conduit/http-conduit [Lars Kuhtz].
+- Replace hardcoded use of IO with type constraints [Lars Kuhtz].
+- Load "trusted-certs.txt" at compile time using TH [Lars Kuhtz].
+- Combine addFile/forceFile/updateFile into a single putFile function.
+
 0.2.0
 
 - New API call 'getFile' to download file from Dropbox [Tim Baumann].
