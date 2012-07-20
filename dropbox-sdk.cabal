@@ -12,7 +12,6 @@ Homepage: http://github.com/cakoose/dropbox-sdk
 Category: Network APIs
 Build-Type: Simple
 Cabal-Version: >= 1.10
-Data-Files: trusted-certs.crt
 
 Library
     Build-Depends:
@@ -40,7 +39,6 @@ Library
         template-haskell
     HS-Source-Dirs: Source
     Exposed-Modules: Dropbox, Dropbox.Certificates, Dropbox.Certificates.TH
-    Other-Modules: Paths_dropbox_sdk
     GHC-Options: -Wall -fno-warn-missing-signatures -fno-warn-name-shadowing -fwarn-unused-imports
     Default-Language: Haskell2010
     Default-Extensions: OverloadedStrings, ScopedTypeVariables, Rank2Types
