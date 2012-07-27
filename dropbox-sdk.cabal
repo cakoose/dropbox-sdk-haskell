@@ -1,5 +1,5 @@
 Name: dropbox-sdk
-Version: 0.2.0
+Version: 0.3.0
 Synopsis: A library to access the Dropbox HTTP API.
 Description:
     A (very preliminary) library to access the Dropbox HTTP API:
