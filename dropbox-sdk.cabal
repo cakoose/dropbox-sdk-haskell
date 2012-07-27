@@ -8,7 +8,7 @@ License: MIT
 License-File: License.txt
 Author: Kannan Goundan <kannan@dropbox.com>
 Maintainer: Kannan Goundan <kannan@dropbox.com>
-Homepage: http://github.com/cakoose/dropbox-sdk
+Homepage: http://github.com/cakoose/dropbox-sdk-haskell
 Category: Network APIs
 Build-Type: Simple
 Cabal-Version: >= 1.10
