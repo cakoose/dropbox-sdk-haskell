@@ -1,5 +1,5 @@
 Name: dropbox-sdk
-Version: 0.3.0
+Version: 0.3.1
 Synopsis: A library to access the Dropbox HTTP API.
 Description:
     A (very preliminary) library to access the Dropbox HTTP API:
@@ -12,6 +12,7 @@ Homepage: http://github.com/cakoose/dropbox-sdk-haskell
 Category: Network APIs
 Build-Type: Simple
 Cabal-Version: >= 1.10
+Extra-Source-Files: trusted-certs.crt
 
 Library
     Build-Depends:

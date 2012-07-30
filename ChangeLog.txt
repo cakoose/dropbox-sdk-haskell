@@ -1,3 +1,7 @@
+0.3.1
+
+- (Fix build) Include "trusted-certs.crt" in source [Tim Baumann].
+
 0.3.0
 
 - Combine addFile/forceFile/updateFile into a single putFile function.
